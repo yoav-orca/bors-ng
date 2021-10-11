@@ -69,6 +69,10 @@ defmodule BorsNG.Worker.Batcher do
     GenServer.cast(pid, {:cancel, patch_id})
   end
 
+  def squash_pr(pid, patch_id) when is_integer(patch_id) do
+    GenServer.cast(pid, {:squash_pr, patch_id})
+  end
+
   def cancel_all(pid) do
     GenServer.cast(pid, {:cancel_all})
   end
@@ -135,6 +139,7 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   def do_handle_cast({:reviewed, patch_id, reviewer}, _project_id) do
+
     case Repo.get(Patch.all(:awaiting_review), patch_id) do
       nil ->
         # Patch exists (otherwise, no ID), but is not awaiting review
@@ -146,32 +151,40 @@ defmodule BorsNG.Worker.Batcher do
         |> send_message([patch], :already_running_review)
 
       patch ->
-        # Patch exists and is awaiting review
-        # This will cause the PR to run after the patch's scheduled delay
-        # if all other conditions are met. It will poll if all conditions
-        # except CI are met and those CI are :waiting.
         project = Repo.get!(Project, patch.project_id)
         repo_conn = get_repo_conn(project)
+        {:ok, commits} = GitHub.get_pr_commits(repo_conn, patch.pr_xref)
+        {:ok, toml} = Batcher.GetBorsToml.get(repo_conn, patch.commit)
 
-        case patch_preflight(repo_conn, patch) do
-          :ok ->
-            run(reviewer, patch)
+        if toml.enforce_squashed_only_pr && length(commits) != 1 do
+          send_message(repo_conn, [patch], :must_squash_before)  
+        else
+          # Patch exists and is awaiting review
+          # This will cause the PR to run after the patch's scheduled delay
+          # if all other conditions are met. It will poll if all conditions
+          # except CI are met and those CI are :waiting.
+          project = Repo.get!(Project, patch.project_id)
+          repo_conn = get_repo_conn(project)
 
-          :waiting ->
-            {:ok, toml} = Batcher.GetBorsToml.get(repo_conn, patch.commit)
+          case patch_preflight(repo_conn, patch) do
+            :ok ->
+              run(reviewer, patch)
 
-            case toml.prerun_timeout_sec do
-              0 ->
-                send_message(repo_conn, [patch], {:preflight, :timeout})
+            :waiting ->
 
-              _ ->
-                send_message(repo_conn, [patch], {:preflight, :waiting})
-                Logger.info("Start Poll Patch #{patch.id} prerun")
-                Process.send_after(self(), {:prerun_poll, 0, {reviewer, patch}}, 0)
-            end
+              case toml.prerun_timeout_sec do
+                0 ->
+                  send_message(repo_conn, [patch], {:preflight, :timeout})
 
-          {:error, message} ->
-            send_message(repo_conn, [patch], {:preflight, message})
+                _ ->
+                  send_message(repo_conn, [patch], {:preflight, :waiting})
+                  Logger.info("Start Poll Patch #{patch.id} prerun")
+                  Process.send_after(self(), {:prerun_poll, 0, {reviewer, patch}}, 0)
+              end
+
+            {:error, message} ->
+              send_message(repo_conn, [patch], {:preflight, message})
+          end
         end
     end
   end
@@ -193,6 +206,81 @@ defmodule BorsNG.Worker.Batcher do
       [] ->
         :ok
     end
+  end
+
+  def do_handle_cast({:squash_pr, patch_id}, _project_id) do
+    
+    # Get the patch
+    patch = Repo.get!(Patch, patch_id)
+
+    project = Repo.get!(Project, patch.project_id)
+    repo_conn = get_repo_conn(project)
+
+    {:ok, commits} = GitHub.get_pr_commits(repo_conn, patch.pr_xref)
+    {:ok, pr} = GitHub.get_pr(repo_conn, patch.pr_xref)
+
+    Logger.info("push force #{inspect(pr)}")
+
+    # create a temporary batch
+    stmp = "bors-squash-merge.tmp"
+    GitHub.force_push!(repo_conn, pr.base_ref, stmp)
+
+    {token, _} = repo_conn
+    user = GitHub.get_user_by_login!(token, pr.user.login)
+
+    Logger.info("PR #{inspect(pr)}")
+    Logger.info("User #{inspect(user)}")
+
+    # If a user doesn't have a public email address in their GH profile
+    # then get the email from the first commit to the PR
+    user_email =
+      if user.email != nil do
+        user.email
+      else
+        Enum.at(commits, 0).author_email
+      end
+
+    # The head sha is the final commit in the PR.
+    source_sha = pr.head_sha
+    Logger.info("Staging branch #{stmp}")
+    Logger.info("Commit sha #{source_sha}")
+
+    toml = Batcher.GetBorsToml.get(
+      repo_conn,
+      patch.commit
+    )
+
+    merge_commit = GitHub.merge_branch!(
+      repo_conn,
+      %{
+        from: source_sha,
+        to: stmp,
+        commit_message:
+          "[ci skip][skip ci][skip netlify] -bors-staging-tmp-#{source_sha}"
+      }
+    )
+
+    commit_message = Batcher.Message.generate_squash_commit_message(
+      pr,
+      commits,
+      user_email,
+      toml.cut_body_after
+    )
+
+    cpt = GitHub.create_commit!(
+      repo_conn,
+      %{
+        tree: merge_commit.tree,
+        parents: [pr.base_ref],
+        commit_message: commit_message,
+        committer: %{name: user.name || user.login, email: user_email}
+      }
+    )
+
+    Logger.info("Commit Sha #{inspect(cpt)}")
+    
+    GitHub.force_push!(repo_conn, cpt, stmp)
+    # GitHub.delete_branch!(repo_conn, stmp)
   end
 
   def do_handle_cast({:cancel, patch_id}, _project_id) do

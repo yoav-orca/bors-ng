@@ -79,6 +79,10 @@ defmodule BorsNG.Worker.Batcher.Message do
     "Has [ci skip][skip ci][skip netlify], bors build will time out"
   end
 
+  def generate_message(:must_squash_before) do
+    "PR is not Squashed, please run XX"
+  end
+
   def generate_message(:already_running_review) do
     "Already running a review"
   end

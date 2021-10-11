@@ -30,7 +30,9 @@ defmodule BorsNG.Worker.Batcher.BorsToml do
             use_codeowners: false,
             committer: nil,
             commit_title: "Merge ${PR_REFS}",
-            update_base_for_deletes: false
+            update_base_for_deletes: false,
+            enforce_squashed_only_pr: false,
+            enable_bors_squash_feature: false
 
   @type tcommitter :: %{
           name: binary,
@@ -51,7 +53,9 @@ defmodule BorsNG.Worker.Batcher.BorsToml do
           use_codeowners: boolean,
           committer: tcommitter,
           commit_title: binary,
-          update_base_for_deletes: boolean
+          update_base_for_deletes: boolean,
+          enforce_squashed_only_pr: boolean,
+          enable_bors_squash_feature: boolean
         }
 
   @type err ::
@@ -124,7 +128,17 @@ defmodule BorsNG.Worker.Batcher.BorsToml do
             ),
           committer: committer,
           commit_title: Map.get(toml, "commit_title", "Merge ${PR_REFS}"),
-          update_base_for_deletes: Map.get(toml, "update_base_for_deletes", false)
+          update_base_for_deletes: Map.get(toml, "update_base_for_deletes", false),
+          enforce_squashed_only_pr: Map.get(
+            toml,
+            "enforce_squashed_only_pr",
+            false
+          ),
+          enable_bors_squash_feature: Map.get(
+            toml,
+            "enable_bors_squash_feature",
+            false
+          )
         }
 
         case toml do

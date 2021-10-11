@@ -107,6 +107,7 @@ defmodule BorsNG.Command do
           | {:autocorrect, binary}
           | :ping
           | :retry
+          | :squash_pr
 
   @doc """
   Parse a comment for bors commands.
@@ -163,6 +164,7 @@ defmodule BorsNG.Command do
   def parse_cmd("p=" <> rest), do: parse_priority(rest)
   def parse_cmd("retry" <> _), do: [:retry]
   def parse_cmd("cancel" <> _), do: [:deactivate]
+  def parse_cmd("squash" <> _), do: [:squash_pr]
   def parse_cmd(_), do: []
 
   @doc ~S"""
@@ -374,6 +376,10 @@ defmodule BorsNG.Command do
     :member
   end
 
+  def required_permission_level_cmd(:squash_pr) do
+    :member
+  end
+
   def required_permission_level_cmd(:retry) do
     :member
   end
@@ -446,6 +452,12 @@ defmodule BorsNG.Command do
   end
 
   def run(c, :deactivate) do
+    c = fetch_patch(c)
+    batcher = Batcher.Registry.get(c.project.id)
+    Batcher.cancel(batcher, c.patch.id)
+  end
+
+  def run(c, :squash_pr) do
     c = fetch_patch(c)
     batcher = Batcher.Registry.get(c.project.id)
     Batcher.cancel(batcher, c.patch.id)
