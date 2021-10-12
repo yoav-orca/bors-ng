@@ -70,6 +70,7 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   def squash_pr(pid, patch_id) when is_integer(patch_id) do
+    Logger.info("squash_pr #{patch_id}")
     GenServer.cast(pid, {:squash_pr, patch_id})
   end
 
@@ -153,11 +154,23 @@ defmodule BorsNG.Worker.Batcher do
       patch ->
         project = Repo.get!(Project, patch.project_id)
         repo_conn = get_repo_conn(project)
-        {:ok, commits} = GitHub.get_pr_commits(repo_conn, patch.pr_xref)
         {:ok, toml} = Batcher.GetBorsToml.get(repo_conn, patch.commit)
 
-        if toml.enforce_squashed_only_pr && length(commits) != 1 do
-          send_message(repo_conn, [patch], :must_squash_before)  
+        send_squash_pr = if toml.enforce_squashed_only_pr do
+          case GitHub.get_pr_commits(repo_conn, patch.pr_xref) do
+            {:ok, commits} ->
+              length(commits) != 1
+
+            {:error, _} ->
+              false
+
+          end
+         else
+          false
+         end
+
+        if send_squash_pr do
+          send_message(repo_conn, [patch], :must_squash_before)
         else
           # Patch exists and is awaiting review
           # This will cause the PR to run after the patch's scheduled delay
@@ -209,78 +222,89 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   def do_handle_cast({:squash_pr, patch_id}, _project_id) do
-    
-    # Get the patch
-    patch = Repo.get!(Patch, patch_id)
 
-    project = Repo.get!(Project, patch.project_id)
-    repo_conn = get_repo_conn(project)
+    if toml.enable_bors_squash_feature do
+      # Get the patch
+      patch = Repo.get!(Patch, patch_id)
 
-    {:ok, commits} = GitHub.get_pr_commits(repo_conn, patch.pr_xref)
-    {:ok, pr} = GitHub.get_pr(repo_conn, patch.pr_xref)
+      project = Repo.get!(Project, patch.project_id)
+      repo_conn = get_repo_conn(project)
 
-    Logger.info("push force #{inspect(pr)}")
+      {:ok, commits} = GitHub.get_pr_commits(repo_conn, patch.pr_xref)
+      {:ok, pr} = GitHub.get_pr(repo_conn, patch.pr_xref)
 
-    # create a temporary batch
-    stmp = "bors-squash-merge.tmp"
-    GitHub.force_push!(repo_conn, pr.base_ref, stmp)
+      Logger.info("push force #{inspect(pr)}")
 
-    {token, _} = repo_conn
-    user = GitHub.get_user_by_login!(token, pr.user.login)
+      # create a temporary batch
+      stmp = "bors-squash-merge.tmp"
+      Logger.info("push force #{inspect(pr)}")
 
-    Logger.info("PR #{inspect(pr)}")
-    Logger.info("User #{inspect(user)}")
+      GitHub.force_push!(repo_conn, pr.base_sha, stmp)
 
-    # If a user doesn't have a public email address in their GH profile
-    # then get the email from the first commit to the PR
-    user_email =
-      if user.email != nil do
-        user.email
-      else
-        Enum.at(commits, 0).author_email
-      end
+      {token, _} = repo_conn
+      user = GitHub.get_user_by_login!(token, pr.user.login)
 
-    # The head sha is the final commit in the PR.
-    source_sha = pr.head_sha
-    Logger.info("Staging branch #{stmp}")
-    Logger.info("Commit sha #{source_sha}")
+      Logger.info("PR #{inspect(pr)}")
+      Logger.info("User #{inspect(user)}")
 
-    toml = Batcher.GetBorsToml.get(
-      repo_conn,
-      patch.commit
-    )
+      # If a user doesn't have a public email address in their GH profile
+      # then get the email from the first commit to the PR
+      user_email =
+        if user.email != nil do
+          user.email
+        else
+          Enum.at(commits, 0).author_email
+        end
 
-    merge_commit = GitHub.merge_branch!(
-      repo_conn,
-      %{
-        from: source_sha,
-        to: stmp,
-        commit_message:
-          "[ci skip][skip ci][skip netlify] -bors-staging-tmp-#{source_sha}"
-      }
-    )
+      # The head sha is the final commit in the PR.
+      source_sha = pr.head_sha
+      Logger.info("Staging branch #{stmp}")
+      Logger.info("Commit sha #{source_sha}")
 
-    commit_message = Batcher.Message.generate_squash_commit_message(
-      pr,
-      commits,
-      user_email,
-      toml.cut_body_after
-    )
+      {:ok, toml} = Batcher.GetBorsToml.get(
+        repo_conn,
+        patch.commit
+      )
 
-    cpt = GitHub.create_commit!(
-      repo_conn,
-      %{
-        tree: merge_commit.tree,
-        parents: [pr.base_ref],
-        commit_message: commit_message,
-        committer: %{name: user.name || user.login, email: user_email}
-      }
-    )
+      Logger.info("toml #{inspect(toml)}")
 
-    Logger.info("Commit Sha #{inspect(cpt)}")
-    
-    GitHub.force_push!(repo_conn, cpt, stmp)
-    # GitHub.delete_branch!(repo_conn, stmp)
+      merge_commit = GitHub.merge_branch!(
+        repo_conn,
+        %{
+          from: source_sha,
+          to: stmp,
+          commit_message:
+            "[ci skip][skip ci][skip netlify] -bors-staging-tmp-#{source_sha}"
+        }
+      )
+
+      Logger.info("merge_commit #{inspect(merge_commit)}")
+
+      commit_message = Batcher.Message.generate_squash_commit_message(
+        pr,
+        commits,
+        user_email,
+        toml.cut_body_after
+      )
+
+      Logger.info("commit_message #{inspect(commit_message)}")
+
+      cpt = GitHub.create_commit!(
+        repo_conn,
+        %{
+          tree: merge_commit.tree,
+          parents: [pr.base_sha],
+          commit_message: commit_message,
+          committer: %{name: user.name || user.login, email: user_email}
+        }
+      )
+
+      Logger.info("cpt = #{inspect(cpt)}")
+
+      GitHub.force_push!(repo_conn, cpt, stmp)
+      GitHub.force_push!(repo_conn, cpt, pr.head_ref)
+      # GitHub.delete_branch!(repo_conn, stmp)
+    end
   end
 
   def do_handle_cast({:cancel, patch_id}, _project_id) do

@@ -57,6 +57,7 @@ defmodule BorsNG.CommandTest do
     assert [:deactivate] == Command.parse("Bors r-")
     assert [:deactivate] == Command.parse("Bors merge-")
     assert [:deactivate] == Command.parse("Bors cancel")
+    assert [:squash_pr] == Command.parse("Bors squash")
   end
 
   test "accept single patch" do

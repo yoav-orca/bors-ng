@@ -10,7 +10,9 @@ defmodule BorsNG.GitHub.Pr do
           body: bitstring | nil,
           state: :open | :closed,
           base_ref: bitstring,
+          base_sha: bitstring,
           head_sha: bitstring,
+          head_ref: bitstring,
           user: BorsNG.GitHub.User.t(),
           # not all PRs have this field populated
           mergeable: boolean | nil,
@@ -22,6 +24,7 @@ defmodule BorsNG.GitHub.Pr do
     body: "",
     state: :closed,
     base_ref: "",
+    base_sha: "",
     head_sha: "",
     user: nil,
     head_ref: "",
@@ -53,6 +56,7 @@ defmodule BorsNG.GitHub.Pr do
           "state" => state,
           "base" => %{
             "ref" => base_ref,
+            "sha" => base_sha,
             "repo" => %{
               "id" => base_repo_id
             }
@@ -93,6 +97,7 @@ defmodule BorsNG.GitHub.Pr do
            "closed" -> :closed
          end,
        base_ref: base_ref,
+       base_sha: base_sha,
        head_sha: head_sha,
        head_ref: head_ref,
        head_repo_id: head_repo_id,
@@ -116,6 +121,7 @@ defmodule BorsNG.GitHub.Pr do
           "state" => state,
           "base" => %{
             "ref" => base_ref,
+            "sha" => base_sha,
             "repo" => %{
               "id" => base_repo_id
             }
@@ -143,6 +149,7 @@ defmodule BorsNG.GitHub.Pr do
       "state" => state,
       "base" => %{
         "ref" => base_ref,
+        "sha" => base_sha,
         "repo" => %{
           "id" => base_repo_id
         }

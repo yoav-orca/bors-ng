@@ -460,7 +460,7 @@ defmodule BorsNG.Command do
   def run(c, :squash_pr) do
     c = fetch_patch(c)
     batcher = Batcher.Registry.get(c.project.id)
-    Batcher.cancel(batcher, c.patch.id)
+    Batcher.squash_pr(batcher, c.patch.id)
   end
 
   def run(c, {:try, arguments}) do
