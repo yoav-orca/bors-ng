@@ -140,7 +140,6 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   def do_handle_cast({:reviewed, patch_id, reviewer}, _project_id) do
-
     case Repo.get(Patch.all(:awaiting_review), patch_id) do
       nil ->
         # Patch exists (otherwise, no ID), but is not awaiting review
@@ -156,18 +155,18 @@ defmodule BorsNG.Worker.Batcher do
         repo_conn = get_repo_conn(project)
         {:ok, toml} = Batcher.GetBorsToml.get(repo_conn, patch.commit)
 
-        send_squash_pr = if toml.enforce_squashed_only_pr do
-          case GitHub.get_pr_commits(repo_conn, patch.pr_xref) do
-            {:ok, commits} ->
-              length(commits) != 1
+        send_squash_pr =
+          if toml.enforce_squashed_only_pr do
+            case GitHub.get_pr_commits(repo_conn, patch.pr_xref) do
+              {:ok, commits} ->
+                length(commits) != 1
 
-            {:error, _} ->
-              false
-
+              {:error, _} ->
+                false
+            end
+          else
+            false
           end
-         else
-          false
-         end
 
         if send_squash_pr do
           send_message(repo_conn, [patch], :must_squash_before)
@@ -184,7 +183,6 @@ defmodule BorsNG.Worker.Batcher do
               run(reviewer, patch)
 
             :waiting ->
-
               case toml.prerun_timeout_sec do
                 0 ->
                   send_message(repo_conn, [patch], {:preflight, :timeout})
@@ -222,14 +220,19 @@ defmodule BorsNG.Worker.Batcher do
   end
 
   def do_handle_cast({:squash_pr, patch_id}, _project_id) do
+    # Get the patch
+    patch = Repo.get!(Patch, patch_id)
+
+    project = Repo.get!(Project, patch.project_id)
+    repo_conn = get_repo_conn(project)
+
+    {:ok, toml} =
+      Batcher.GetBorsToml.get(
+        repo_conn,
+        patch.commit
+      )
 
     if toml.enable_bors_squash_feature do
-      # Get the patch
-      patch = Repo.get!(Patch, patch_id)
-
-      project = Repo.get!(Project, patch.project_id)
-      repo_conn = get_repo_conn(project)
-
       {:ok, commits} = GitHub.get_pr_commits(repo_conn, patch.pr_xref)
       {:ok, pr} = GitHub.get_pr(repo_conn, patch.pr_xref)
 
@@ -261,48 +264,52 @@ defmodule BorsNG.Worker.Batcher do
       Logger.info("Staging branch #{stmp}")
       Logger.info("Commit sha #{source_sha}")
 
-      {:ok, toml} = Batcher.GetBorsToml.get(
-        repo_conn,
-        patch.commit
-      )
+      {:ok, toml} =
+        Batcher.GetBorsToml.get(
+          repo_conn,
+          patch.commit
+        )
 
       Logger.info("toml #{inspect(toml)}")
 
-      merge_commit = GitHub.merge_branch!(
-        repo_conn,
-        %{
-          from: source_sha,
-          to: stmp,
-          commit_message:
-            "[ci skip][skip ci][skip netlify] -bors-staging-tmp-#{source_sha}"
-        }
-      )
+      merge_commit =
+        GitHub.merge_branch!(
+          repo_conn,
+          %{
+            from: source_sha,
+            to: stmp,
+            commit_message: "[ci skip][skip ci][skip netlify] -bors-staging-tmp-#{source_sha}"
+          }
+        )
 
       Logger.info("merge_commit #{inspect(merge_commit)}")
 
-      commit_message = Batcher.Message.generate_squash_commit_message(
-        pr,
-        commits,
-        user_email,
-        toml.cut_body_after
-      )
+      commit_message =
+        Batcher.Message.generate_squash_commit_message(
+          pr,
+          commits,
+          user_email,
+          toml.cut_body_after
+        )
 
       Logger.info("commit_message #{inspect(commit_message)}")
 
-      cpt = GitHub.create_commit!(
-        repo_conn,
-        %{
-          tree: merge_commit.tree,
-          parents: [pr.base_sha],
-          commit_message: commit_message,
-          committer: %{name: user.name || user.login, email: user_email}
-        }
-      )
+      cpt =
+        GitHub.create_commit!(
+          repo_conn,
+          %{
+            tree: merge_commit.tree,
+            parents: [pr.base_sha],
+            commit_message: commit_message,
+            committer: %{name: user.name || user.login, email: user_email}
+          }
+        )
 
       Logger.info("cpt = #{inspect(cpt)}")
 
       GitHub.force_push!(repo_conn, cpt, stmp)
       GitHub.force_push!(repo_conn, cpt, pr.head_ref)
+
       # GitHub.delete_branch!(repo_conn, stmp)
     end
   end
